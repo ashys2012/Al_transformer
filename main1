@@ -323,8 +323,8 @@ class VisionTransformer(nn.Module):
         out = self.mlp_head(cls)
         return out
 
-class ViT(pl.LightningModule):
-    def __init__(self, model_kwargs, lr):
+class ViT(ActiveLightningModule):
+    def __init__(self, model_kwargs, lr,**kwargs):
         super().__init__()
         self.save_hyperparameters()
         self.model = VisionTransformer(**model_kwargs)
@@ -364,7 +364,27 @@ class ViT(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         self._calculate_loss(batch, mode="test")
 
+
+    @classmethod
+    def add_model_specific_args(cls, parser):
+        parser.add_argument("--iterations", type = int, default=20, help = "NUmber of MC Sampling to perform")
+        parser.add_argument("--replicate_in_memory", type = bool, default=True)
+        parser.add_argument("--batch_size", type = int, default=10)
+        return parser
+from argparse import ArgumentParser
+
+def parse_arguments():
+    parser = ArgumentParser()
+    parser = ArgumentParser(parents=[parser], add_help=False)
+    parser.add_argument("--query_size", type= int, default = 100, help = "how many items to label per step")
+    return parser.parse_args()
+
+
+
+
+
 def train_model(**kwargs):
+    args = parse_arguments()
     datamodule = NEUSteelDataModule(batch_size=32)
     pool_dataloader = datamodule.pool_dataloader()
     #datamodule.active_dataset.label_randomly(100)
