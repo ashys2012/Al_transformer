@@ -1,0 +1,428 @@
+import os
+import urllib.request
+from urllib.error import HTTPError
+
+import matplotlib
+import matplotlib.pyplot as plt
+import pytorch_lightning as pl
+import seaborn as sns
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import torch.utils.data as data
+import torchvision
+from IPython.display import set_matplotlib_formats
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+from torchvision import transforms
+from torchvision.datasets import CIFAR10
+from torchvision.datasets import ImageFolder
+from torchvision.transforms import ToTensor
+from simple_ex_wandb import dataset_split, data_loader
+from torch.utils.data import DataLoader, random_split
+from torchmetrics import Accuracy
+from pytorch_lightning.loggers import WandbLogger
+import numpy as np
+from data_1 import pool_dataloader1
+import csv
+import os
+import random
+from argparse import ArgumentParser
+from copy import deepcopy
+from dataclasses import dataclass
+
+import numpy as np
+import torch
+import torch.backends
+import torch.nn as nn
+import torch.optim as optim
+from torch import optim
+from torch.hub import load_state_dict_from_url
+from torch.nn import CrossEntropyLoss
+from torchvision import datasets, models
+from torchvision.models import vgg16
+from torchvision.transforms import transforms
+from tqdm.auto import tqdm
+from tqdm.autonotebook import tqdm
+import torch
+from torch import nn, optim
+from baal.modelwrapper import ModelWrapper
+from torchvision.models import vgg16
+from baal.bayesian.dropout import MCDropoutModule
+from baal.active.heuristics import BALD, Entropy
+from baal.active import ActiveLearningDataset, get_heuristic
+from baal.active.active_loop import ActiveLearningLoop
+from baal.bayesian.dropout import patch_module
+from baal.modelwrapper import ModelWrapper
+from baal.utils.metrics import Accuracy
+from baal.ensemble import EnsembleModelWrapper
+import os
+import torch
+import torchvision
+import tarfile
+from torchvision.datasets.utils import download_url
+from torch.utils.data import random_split
+from torchvision.datasets import ImageFolder
+from baal.active import FileDataset, ActiveLearningDataset
+from torchvision import transforms
+from glob import glob
+import os
+from baal.utils.pytorch_lightning import (
+    ActiveLightningModule,
+    ResetCallback,
+    BaalTrainer,
+    BaaLDataModule
+)
+
+from sklearn.model_selection import train_test_split
+
+plt.set_cmap("cividis")
+matplotlib.rcParams["lines.linewidth"] = 2.0
+sns.reset_orig()
+classes = ("crazing", "inclusion", "patches", "pitted_surface", "rolled-in_scale", "scratches")
+DATASET_PATH = os.environ.get("PATH_DATASETS", "data/")
+
+# Setting the seed
+pl.seed_everything(42)
+
+# Ensure that all operations are deterministic on GPU (if used) for reproducibility
+torch.backends.cudnn.determinstic = True
+torch.backends.cudnn.benchmark = False
+
+device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+print("Device:", device)
+
+
+
+
+
+
+
+# We use -1 to specify that the data is unlabeled. THe whole testing set is also unlabeled and has been trans4med.
+#dataset_test = FileDataset(VALID_DIR, [-1] * len(VALID_DIR))
+
+#print(f"Train: {len(dataset_train)}, Valid: {len(dataset_test)}, Num. classes : {len(classes)}")
+'''
+The FileDataset class is a PyTorch dataset object that loads files and applies transformations to them. 
+It takes in a list of file paths, optional labels, and various transformation functions. 
+The __len__ method returns the number of files in the dataset, and the __getitem__ method loads and transforms 
+a single file based on its index. The label method allows for the assignment of labels to files after initialization. 
+The get_kwargs method extracts any necessary keyword arguments for the transformation function.
+'''
+
+
+class NEUSteelDataModule(BaaLDataModule):
+    def __init__(self, batch_size):
+        TRAIN_DIR = glob("/home/achazhoor/PycharmProjects/steel_classification/Train/*/*.bmp")
+        VALID_DIR = glob("/home/achazhoor/PycharmProjects/steel_classification/Test/*/*.bmp")
+        train_transform = transforms.Compose([transforms.RandomHorizontalFlip(),
+                                              transforms.RandomApply(
+                                                  [transforms.ColorJitter(brightness=0.5, contrast=0.5,
+                                                                          saturation=0.5, hue=0.1)], p=0.5),
+                                              transforms.GaussianBlur(kernel_size=5),
+                                              transforms.ToTensor(),
+                                              transforms.Normalize((0.4934, 0.4934, 0.4934), (0.2243, 0.2243, 0.2243))
+                                              ])
+        test_transform = transforms.Compose([transforms.ToTensor()])
+        def get_label(img_path):
+            return classes.index(img_path.split('/')[-2])
+        dataset_train = FileDataset(TRAIN_DIR, [-1] * len(TRAIN_DIR), train_transform)
+        self.test_set = FileDataset(VALID_DIR, [-1] * len(VALID_DIR))
+        unique_labels = np.unique([get_label(f) for f in dataset_train.files])
+        self.num_classes = len(unique_labels)
+        active_set = ActiveLearningDataset(dataset_train, pool_specifics={'transform': test_transform})
+
+        super().__init__(active_dataset=active_set, batch_size=batch_size)
+
+        print(f"Train: {len(dataset_train)}, Valid: {len(self.test_set)}, Num. classes : {self.num_classes}")
+        print("Train len of active_set:", len(self.active_dataset))
+
+        def get_label(img_path):
+            return classes.index(img_path.split('/')[-2])
+
+        for idx in range(len(self.test_set)):  # len is 360
+            img_path = self.test_set.files[idx]
+            self.test_set.label(idx, get_label(img_path))
+
+        train_idxs = np.random.permutation(np.arange(len(dataset_train)))[:100].tolist()
+        labels = [get_label(dataset_train.files[idx]) for idx in train_idxs]
+        active_set.label(train_idxs, labels)
+
+        print("Train_new:", len(self.active_dataset))
+        print("pool-------:", len(self.active_dataset.pool))
+
+    def pool_dataloader(self):
+        return DataLoader(self.active_dataset, batch_size=self.batch_size)
+
+    def train_dataloader(self) -> DataLoader:
+        return DataLoader(self.active_dataset, self.batch_size, shuffle=False, num_workers=12)
+
+    def test_dataloader(self) -> DataLoader:
+        return DataLoader(self.test_set, self.batch_size, shuffle=False, num_workers=12, collate_fn=self.custom_collate)
+
+    def custom_collate(self, batch):
+        images, labels = zip(*batch)
+        images = [transforms.ToTensor()(img) for img in images]
+        return torch.stack(images), torch.tensor(labels)
+
+    def state_dict(self):
+        # return state dictionary
+        return {
+            "active_dataset": self.active_dataset.state_dict(),
+            "batch_size": self.batch_size,
+            # add any other state information you want to save
+        }
+
+    def load_state_dict(self, state_dict):
+        # load state dictionary
+        self.active_dataset.load_state_dict(state_dict["active_dataset"])
+        self.batch_size = state_dict["batch_size"]
+
+
+
+
+
+# image will be divided into  patches because the dims in 200x200 -- we will get each image patch of 25x25
+def img_to_patch(x, patch_size, flatten_channels=True):
+    """
+    Inputs:
+        x - Tensor representing the image of shape [B, C, H, W]
+        patch_size - Number of pixels per dimension of the patches (integer)
+        flatten_channels - If True, the patches will be returned in a flattened format
+                           as a feature vector instead of a image grid.
+
+       This is a Python function that takes an input image tensor x of shape [B, C, H, W]
+        and converts it into a tensor of patches of size patch_size of shape [B, H' * W', C * p_H * p_W],
+        where H' = H // patch_size and W' = W // patch_size.
+
+        If the img_to_patch function is called with an input image tensor of size 32x32 with 3 channels,
+        and patch_size=8, the output will be a tensor of size [1, 16, 192] if flatten_channels=True,
+        or [1, 16, 3, 64] if flatten_channels=False.
+    """
+
+    B, C, H, W = x.shape
+    x = x.reshape(B, C, H // patch_size, patch_size, W // patch_size, patch_size)
+    x = x.permute(0, 2, 4, 1, 3, 5)  # [B, H', W', C, p_H, p_W]
+    x = x.flatten(1, 2)  # [B, H'*W', C, p_H, p_W]
+    if flatten_channels:
+        x = x.flatten(2, 4)  
+    return x
+
+#we are using a pre layer normalization for this transformer
+
+class AttentionBlock(nn.Module):
+    def __init__(self, embed_dim, hidden_dim, num_heads, dropout=0.0):
+        """
+        Inputs:
+            embed_dim - Dimensionality of input and attention feature vectors
+            hidden_dim - Dimensionality of hidden layer in feed-forward network
+                         (usually 2-4x larger than embed_dim)
+            num_heads - Number of heads to use in the Multi-Head Attention block
+            dropout - Amount of dropout to apply in the feed-forward network
+        """
+        super().__init__()
+
+        self.layer_norm_1 = nn.LayerNorm(embed_dim)
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads)
+        self.layer_norm_2 = nn.LayerNorm(embed_dim)
+        self.linear = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, embed_dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        inp_x = self.layer_norm_1(x)
+        x = x + self.attn(inp_x, inp_x, inp_x)[0]
+        x = x + self.linear(self.layer_norm_2(x))
+        return x
+
+class VisionTransformer(nn.Module):
+    def __init__(
+        self,
+        embed_dim,
+        hidden_dim,
+        num_channels,
+        num_heads,
+        num_layers,
+        num_classes,
+        patch_size,
+        num_patches,
+        dropout=0.0,
+    ):
+        """
+        Inputs:
+            embed_dim - Dimensionality of the input feature vectors to the Transformer
+            hidden_dim - Dimensionality of the hidden layer in the feed-forward networks
+                         within the Transformer
+            num_channels - Number of channels of the input (3 for RGB)
+            num_heads - Number of heads to use in the Multi-Head Attention block
+            num_layers - Number of layers to use in the Transformer
+            num_classes - Number of classes to predict
+            patch_size - Number of pixels that the patches have per dimension
+            num_patches - Maximum number of patches an image can have
+            dropout - Amount of dropout to apply in the feed-forward network and
+                      on the input encoding
+        """
+        super().__init__()
+
+        self.patch_size = patch_size
+        #print("Self.patch_size inside vision transoformer class is:|" , self.patch_size)
+        #print("Self.num_patches inside vision transoformer class is:|", num_patches)
+
+        # Layers/Networks
+        self.input_layer = nn.Linear(num_channels * (patch_size**2), embed_dim)
+        self.transformer = nn.Sequential(
+            *(AttentionBlock(embed_dim, hidden_dim, num_heads, dropout=dropout) for _ in range(num_layers))
+        )
+        self.mlp_head = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, num_classes))
+        self.dropout = nn.Dropout(dropout)
+
+        # Parameters/Embeddings
+        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
+        #print("Num of patches near pos_embed is: ", num_patches)
+        self.pos_embedding = nn.Parameter(torch.randn(1, 1 + num_patches, embed_dim))
+
+    def forward(self, x):
+        # Preprocess input
+        #patch_size = 8
+        #print("X in the forward method of VisionTransformer: ", x.shape)    #3,200,200
+        #batch_size = x.shape[0]
+
+        #print("X in the forward method of VisionTransformer after the unsqueeze: ", x.shape)
+        x = img_to_patch(x,self.patch_size)     #x has a shape of (batch_size, seq_len, embedding_dim)
+        #print("Shape of X in cls VisionTransformer", x.shape)
+        # print("pATch size inside class VisionTransformer is", self.patch_size)
+        B, T, _ = x.shape
+        # print("patch_size in forward self is", self.patch_size)
+        # print("the shape of B is" , B)
+        # print("the shape of T is", T)
+        x = self.input_layer(x)
+
+
+
+        # Add CLS token and positional encoding
+        cls_token = self.cls_token.repeat(B, 1, 1)
+        x = torch.cat([cls_token, x], dim=1)
+
+        num_patches = T
+
+
+        x = x + self.pos_embedding[:, : T + 1]
+
+
+        # Apply Transforrmer
+        x = self.dropout(x)
+        x = x.transpose(0, 1)
+        x = self.transformer(x)
+
+        # Perform classification prediction
+        cls = x[0]
+        out = self.mlp_head(cls)
+        return out
+
+class ViT(pl.LightningModule):
+    def __init__(self, model_kwargs, lr):
+        super().__init__()
+        self.save_hyperparameters()
+        self.model = VisionTransformer(**model_kwargs)
+        #self.example_input_array = next(iter(td.active_dataset))[0]
+        self.train_accuracy = Accuracy(task="multiclass", num_classes=6)
+        self.val_accuracy = Accuracy(task="multiclass", num_classes=6)
+        self.test_accuracy = Accuracy(task="multiclass", num_classes=6)
+
+    def forward(self, x):
+        #print("VIT forward ---", x.shape)
+        return self.model(x)
+
+    def configure_optimizers(self):
+        optimizer = optim.AdamW(self.parameters(), lr=self.hparams.lr)
+        lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[100, 200], gamma=0.1)
+        return [optimizer], [lr_scheduler]
+
+    def _calculate_loss(self, batch, mode="train"):
+        imgs, labels = batch
+        preds = self.model(imgs)
+        loss = F.cross_entropy(preds, labels)
+        acc = (preds.argmax(dim=-1) == labels).float().mean()
+
+        self.log("%s_loss" % mode, loss)
+        self.log("%s_acc" % mode, acc)
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        #print("training_batch is:", batch.shape)
+        loss = self._calculate_loss(batch, mode="train")
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        print("training_batch is:", batch.shape)
+        self._calculate_loss(batch, mode="val")
+
+    def test_step(self, batch, batch_idx):
+        self._calculate_loss(batch, mode="test")
+
+def train_model(**kwargs):
+    datamodule = NEUSteelDataModule(batch_size=32)
+    pool_dataloader = datamodule.pool_dataloader()
+    #datamodule.active_dataset.label_randomly(100)
+    heuristic = Entropy(shuffle_prop=0.1)
+    #wandb_logger = WandbLogger(name="vit_AL_1", project='Vision_Transformers_AL')
+    trainer = BaalTrainer(
+        dataset = datamodule.active_dataset,
+        default_root_dir=os.path.join(CHECKPOINT_PATH, "ViT"),
+        gpus= 1, #if str(device) == "cuda:0" else 0,
+        max_epochs=0,
+        heuristic=heuristic,
+        query_size=50,
+        #logger=wandb_logger,
+        callbacks=[
+            ModelCheckpoint(save_top_k=1,save_weights_only=True, mode="max", monitor="val_acc"),
+            LearningRateMonitor("epoch"),
+        ]
+       # progress_bar_refresh_rate=1,
+    )
+    trainer.logger._log_graph = True  # If True, we plot the computation graph in tensorboard
+    trainer.logger._default_hp_metric = None  # Optional logging argument that we don't need
+    
+
+    model = ViT(**kwargs)
+
+
+
+    AL_STEPS =100
+    for al_step in range(AL_STEPS):
+        datamodule = NEUSteelDataModule(batch_size=32)
+        pool_dataloader = datamodule.pool_dataloader()
+        print(f"Step {al_step} Dataset size {len(datamodule.active_dataset)}")
+        print("poool", len(datamodule.active_dataset.pool))
+        trainer.fit(model, datamodule = datamodule)
+        trainer.test(model, datamodule=datamodule)
+        should_continue = trainer.step(
+            model,
+            datamodule= datamodule,
+            #datamodule=pool_dataloader
+        )
+        if not should_continue:
+            break
+
+
+    return model
+
+model, results = train_model(
+    model_kwargs={
+        "embed_dim": 256,
+        "hidden_dim": 512,
+        "num_heads": 8,
+        "num_layers": 6,
+        "patch_size": 8,
+        "num_channels": 3,
+        "num_patches": 625,
+        "num_classes": 6,
+        "dropout": 0.2,
+    },
+    lr=3e-4,
+)
+#print("ViT results", results)
