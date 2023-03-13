@@ -1,3 +1,5 @@
+import copy
+
 import os
 import urllib.request
 from urllib.error import HTTPError
@@ -74,7 +76,6 @@ from baal.utils.pytorch_lightning import (
     BaaLDataModule
 )
 
-
 classes = ("crazing", "inclusion", "patches", "pitted_surface", "rolled-in_scale", "scratches")
 
 '''
@@ -85,48 +86,71 @@ a single file based on its index. The label method allows for the assignment of 
 The get_kwargs method extracts any necessary keyword arguments for the transformation function.
 '''
 
-
-#Data path and Transforms Section
+# Data path and Transforms Section
 VALID_DIR = "/home/achazhoor/PycharmProjects/steel_classification/Test"
 TRAIN_DIR = glob("/home/achazhoor/PycharmProjects/steel_classification/Train/*/*.bmp")
 test_transform = transforms.Compose([transforms.ToTensor()])
 train_transform = transforms.Compose([transforms.RandomHorizontalFlip(),
-                                              transforms.RandomApply(
-                                                  [transforms.ColorJitter(brightness=0.5, contrast=0.5,
-                                                                          saturation=0.5, hue=0.1)], p=0.5),
-                                              transforms.GaussianBlur(kernel_size=5),
-                                              transforms.ToTensor(),
-                                              transforms.Normalize((0.4934, 0.4934, 0.4934), (0.2243, 0.2243, 0.2243))
-                                              ])
+                                      transforms.RandomApply(
+                                          [transforms.ColorJitter(brightness=0.5, contrast=0.5,
+                                                                  saturation=0.5, hue=0.1)], p=0.5),
+                                      transforms.GaussianBlur(kernel_size=5),
+                                      transforms.ToTensor(),
+                                      transforms.Normalize((0.4934, 0.4934, 0.4934), (0.2243, 0.2243, 0.2243))
+                                      ])
 
 # Section place for Imagefolder instance on test and val datasets
 dataset_test = ImageFolder(VALID_DIR, transform=test_transform)
 # Splitting Val and Test sets
-test_set_size = int(len(dataset_test) * 0.2)  # we divide the test set into test and validation keeping the train size more from previous
+test_set_size = int(
+    len(dataset_test) * 0.2)  # we divide the test set into test and validation keeping the train size more from previous
 valid_set_size = len(dataset_test) - test_set_size
 seed = torch.Generator().manual_seed(42)
 test_set, valid_set = random_split(dataset_test, [test_set_size, valid_set_size], generator=seed)
 val_dl = DataLoader(valid_set, batch_size=16, shuffle=False, num_workers=0)
 test_dl = DataLoader(test_set, batch_size=16, shuffle=False, num_workers=0)
 
-#Everything on Train_dataset
+
+# Everything on Train_dataset
 
 def get_label(img_path):
     return classes.index(img_path.split('/')[-2])
 
 
-
+# def custom_dl():
+#    global pool, pool_loader
 
 train_dataset = FileDataset(TRAIN_DIR, [-1] * len(TRAIN_DIR), train_transform)
 active_set = ActiveLearningDataset(train_dataset, pool_specifics={'transform': test_transform})
-train_idxs = np.random.permutation(np.arange(len(train_dataset)))[:240].tolist()   # label 20% data
+train_idxs = np.random.permutation(np.arange(len(train_dataset)))[:240].tolist()  # label 20% data
 labels = [get_label(train_dataset.files[idx]) for idx in train_idxs]
 active_set.label(train_idxs, labels)
-train_loader = DataLoader(active_set, batch_size=2, num_workers=0, shuffle=True)
+train_loader = DataLoader(active_set, batch_size=64, num_workers=0, shuffle=True)
 
 
+# return train_loader, pool_loader
 
 
+# train_dl, pool = custom_dl()
+# custom_dl().train_dataset
+
+
+# Shape code below
+# for batch_idx, (data, target) in enumerate(train_dl):
+#     if batch_idx == 0:
+#         print("shape is ", data.shape)
+#         print("Target is", target)
+#         break
+#
+# for batch_idx, (data, target) in enumerate(pool_dl):
+#     if batch_idx == 0:
+#         print("shape is ", data.shape)
+#         print("Target is", target)
+#         break
+
+
+# ALl the names of the dataloader
+# train_dl, val_dl and test_dl
 
 # image will be divided into  patches because the dims in 200x200 -- we will get each image patch of 25x25
 def img_to_patch(x, patch_size, flatten_channels=True):
@@ -145,7 +169,7 @@ def img_to_patch(x, patch_size, flatten_channels=True):
         and patch_size=8, the output will be a tensor of size [1, 16, 192] if flatten_channels=True,
         or [1, 16, 3, 64] if flatten_channels=False.
     """
-   
+
     B, C, H, W = x.shape
     x = x.reshape(B, C, H // patch_size, patch_size, W // patch_size, patch_size)
     x = x.permute(0, 2, 4, 1, 3, 5)  # [B, H', W', C, p_H, p_W]
@@ -154,70 +178,9 @@ def img_to_patch(x, patch_size, flatten_channels=True):
         x = x.flatten(2, 4)  # [B, H'*W', C*p_H*p_W]
     return x
 
-#we are using a pre layer normalization for this transformer
 
-
-class AttentionBlock(nn.Module):
-    def __init__(self, embed_dim, hidden_dim, num_heads, dropout=0.0):
-        """
-        Inputs:
-            embed_dim - Dimensionality of input and attention feature vectors
-            hidden_dim - Dimensionality of hidden layer in feed-forward network
-                         (usually 2-4x larger than embed_dim)
-            num_heads - Number of heads to use in the Multi-Head Attention block
-            dropout - Amount of dropout to apply in the feed-forward network
-        """
-        super().__init__()
-
-        self.layer_norm_1 = nn.LayerNorm(embed_dim)
-        self.attn = nn.MultiheadAttention(embed_dim, num_heads)
-        self.layer_norm_2 = nn.LayerNorm(embed_dim)
-        self.linear = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, embed_dim),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x):
-        inp_x = self.layer_norm_1(x)
-        x = x + self.attn(inp_x, inp_x, inp_x)[0]
-        x = x + self.linear(self.layer_norm_2(x))
-        return x
-
-class VisionTransformer(nn.Module):
-    def __init__(
-        self,
-        embed_dim,
-        hidden_dim,
-        num_channels,
-        num_heads,
-        num_layers,
-        num_classes,
-        patch_size,
-        num_patches,
-        dropout=0.0,
-    ):
-        """
-        Inputs:
-            embed_dim - Dimensionality of the input feature vectors to the Transformer
-            hidden_dim - Dimensionality of the hidden layer in the feed-forward networks
-                         within the Transformer
-            num_channels - Number of channels of the input (3 for RGB)
-            num_heads - Number of heads to use in the Multi-Head Attention block
-            num_layers - Number of layers to use in the Transformer
-            num_classes - Number of classes to predict
-            patch_size - Number of pixels that the patches have per dimension
-            num_patches - Maximum number of patches an image can have
-            dropout - Amount of dropout to apply in the feed-forward network and
-                      on the input encoding
-        """
-        super().__init__()
-
-        self.patch_size = patch_size
-        # Layers/Networks
-        self.input_layer = nn.Linear(num_channels * (patch_size**2), embed_dim)
+# we are using a pre layer normalization for this transformer
+        self.input_layer = nn.Linear(num_channels * (patch_size ** 2), embed_dim)
         self.transformer = nn.Sequential(
             *(AttentionBlock(embed_dim, hidden_dim, num_heads, dropout=dropout) for _ in range(num_layers))
         )
@@ -230,118 +193,53 @@ class VisionTransformer(nn.Module):
 
     def forward(self, x):
         # Preprocess input
-        x = img_to_patch(x,self.patch_size)     #x has a shape of (batch_size, seq_len, embedding_dim)
-        B, T, _ = x.shape
-        x = self.input_layer(x)
-
-
-
-        # Add CLS token and positional encoding
-        cls_token = self.cls_token.repeat(B, 1, 1)
-        x = torch.cat([cls_token, x], dim=1)
-        num_patches = T
-        x = x + self.pos_embedding[:, : T + 1]
-
-
-        # Apply Transforrmer
-        x = self.dropout(x)
-        x = x.transpose(0, 1)
-        x = self.transformer(x)
-
-        # Perform classification prediction
-        cls = x[0]
-        out = self.mlp_head(cls)
-        return out
-
-class ViT(ActiveLightningModule):
-    def __init__(self, model_kwargs, lr,**kwargs):
-        super().__init__()
-        self.save_hyperparameters()
-        self.model = VisionTransformer(**model_kwargs)
-        self.train_accuracy = Accuracy(task="multiclass", num_classes=6)
-        self.val_accuracy = Accuracy(task="multiclass", num_classes=6)
-        self.test_accuracy = Accuracy(task="multiclass", num_classes=6)
-
-    def forward(self, x):
-        return self.model(x)
-
-    def configure_optimizers(self):
-        optimizer = optim.AdamW(self.parameters(), lr=self.hparams.lr)
-        lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[100, 200], gamma=0.1)
-        return [optimizer], [lr_scheduler]
-
-    def _calculate_loss(self, batch, mode="train"):
-        imgs, labels = batch
-        preds = self.model(imgs)
-        loss = F.cross_entropy(preds, labels)
-        acc = (preds.argmax(dim=-1) == labels).float().mean()
-
-        self.log("%s_loss" % mode, loss)
-        self.log("%s_acc" % mode, acc)
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        loss = self._calculate_loss(batch, mode="train")
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        self._calculate_loss(batch, mode="val")
-
-    def test_step(self, batch, batch_idx):
-        self._calculate_loss(batch, mode="test")
-
-
-    @classmethod
-    def add_model_specific_args(cls, parser):
-        parser.add_argument("--iterations", type = int, default=15, help = "NUmber of MC Sampling to perform")
-        parser.add_argument("--replicate_in_memory", type = bool, default=False)
-        parser.add_argument("--batch_size", type = int, default=2)
+        x = img_to_patch(x, self.patch_size)  # x has a shape of (batch_size, seq_len, embedding_dim)
+        parser.add_argument("--iterations", type=int, default=1, help="NUmber of MC Sampling to perform")
+        parser.add_argument("--replicate_in_memory", type=bool, default=False)
+        parser.add_argument("--batch_size", type=int, default=2)
         return parser
 
+
 from argparse import ArgumentParser
+
 
 def parse_arguments():
     parser = ArgumentParser()
     parser = ViT.add_model_specific_args(parser)
     parser = ArgumentParser(parents=[parser], add_help=False)
-    parser.add_argument("--query_size", type= int, default = 20, help = "how many items to label per step")
-    parser.add_argument("--heuristic", type= str, default="entropy", help = "which heuristic to use")
+    parser.add_argument("--query_size", type=int, default=20, help="how many items to label per step")
+    parser.add_argument("--heuristic", type=str, default="entropy", help="which heuristic to use")
     return parser.parse_args()
-
 
 
 def train_model(**kwargs):
     args = parse_arguments()
     model = ViT(**kwargs, **vars(args))
-    heuristic = get_heuristic(args.heuristic, shuffle_prop = 0.1)
+    heuristic = get_heuristic(args.heuristic, shuffle_prop=0.0)
     wandb_logger = WandbLogger(name="vit_AL_11", project='Vision_Transformers_AL')
 
     trainer = BaalTrainer.from_argparse_args(args,
                                              dataset=TRAIN_DIR,
-                                             gpus= 1,
-                                             #accelerator="gpu",  # if str(device) == "cuda:0" else 0,
+                                             gpus=1,
+                                             # accelerator="gpu",  # if str(device) == "cuda:0" else 0,
                                              devices=1,
                                              # max_epochs=10,
-                                             #strategy="ddp",
-                                             max_epochs=100,
+                                             # strategy="ddp",
+                                             max_epochs=2,
                                              heuristic=heuristic,
                                              query_size=args.query_size,
                                              logger=wandb_logger,
-                                             callbacks=[
-                                                 ModelCheckpoint(save_top_k=1, save_weights_only=True, mode="max",
-                                                                 monitor="val_acc"),
-                                                 LearningRateMonitor("epoch"),
-                                             ]
+                                             callbacks=[ResetCallback(copy.deepcopy(model.state_dict())),
+                                                        # ModelCheckpoint(save_top_k=1, save_weights_only=True,
+                                                        #                 mode="max",
+                                                        #                 monitor="val_acc"),
+                                                        # LearningRateMonitor("epoch"),
+                                                        ]
                                              )
 
-
-    val_result = trainer.test(model, dataloaders=val_dl, verbose=False)
-    test_result = trainer.test(model, dataloaders=test_dl, verbose=False)
-    result = {"test": test_result[0]["test_acc"], "val": val_result[0]["test_acc"]}
-
-
-    AL_STEPS =150
+    AL_STEPS = 150
     for al_step in range(AL_STEPS):
+        print("for loop begins here------")
         pool = active_set.pool
         pool_loader = DataLoader(pool, batch_size=2, num_workers=0, shuffle=False)
         if len(pool) == 0:
@@ -356,22 +254,29 @@ def train_model(**kwargs):
         labels_l = [get_label(train_dataset.files[idx]) for idx in oracle_indices_labelled]
         active_set.label(top_uncertainty, labels_l)
         print("pool-----", len(pool))
-        #if not should_continue:
-         #   break
+        val_result = trainer.test(model, dataloaders=val_dl, verbose=False)
+        test_result = trainer.test(model, dataloaders=test_dl, verbose=False)
+        result = {"test": test_result[0]["test_acc"], "val": val_result[0]["test_acc"]}
+        trainer.fit(model, train_loader, val_dl)
+
+        # if not should_continue:
+        #   break
     return model, result
 
-model, results = train_model(
-    model_kwargs={
-        "embed_dim": 256,
-        "hidden_dim": 512,
-        "num_heads": 8,
-        "num_layers": 6,
-        "patch_size": 8,
-        "num_channels": 3,
-        "num_patches": 625,
-        "num_classes": 6,
-        "dropout": 0.2,
-    },
-    lr=3e-4,
-)
-#print("ViT results", results)
+
+if __name__ == '__main__':
+    model, results = train_model(
+        model_kwargs={
+            "embed_dim": 256,
+            "hidden_dim": 512,
+            "num_heads": 8,
+            "num_layers": 6,
+            "patch_size": 8,
+            "num_channels": 3,
+            "num_patches": 625,
+            "num_classes": 6,
+            "dropout": 0.2,
+        },
+        lr=3e-4,
+    )
+# print("ViT results", results)
